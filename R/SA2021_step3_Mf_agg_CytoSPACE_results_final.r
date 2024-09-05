@@ -215,160 +215,6 @@ for(sample in samples) {
 }
 
 
-### Section 4: DEG analysis  --------------------------------------------------
-# Load necessary libraries for data manipulation and analysis.
-library(scater)
-library(DESeq2)
-library(SingleCellExperiment)
-library(edgeR)
-library(rJava)
-library(xlsx)
-library(stringr)
-library(dplyr)
-library(tidyr)
-
-# Function to perform garbage collection in Java and R
-jgc <- function() {
-  .jcall("java/lang/System", method = "gc")
-  gc()
-}
-
-# Extract raw counts and metadata to create SingleCellExperiment object
-counts <- LayerData(seu, assay = "RNA", layer = "counts")
-Mph_total_values <- c(3, 4, 5, 6)
-for (mf_total_values in Mph_total_values) {
-    seu$Mf_agg <- factor(ifelse((seu$Mph_total >= mf_total_values), "Agg", "Sca"))
-    Idents(seu) <- seu$Mf_agg
-    metadata <- seu@meta.data
-
-    # Set up metadata as desired for aggregation and DE analysis
-    metadata$Mf_agg <- factor(metadata$Mf_agg)
-    metadata$SC_sample <- factor(metadata$SC_sample)
-    metadata$CellType_l1 <- "Mph"
-
-
-    # Define a range of mincell values
-    mincell <- 10
-
-    
-
-    # stress_genes <- c("G0S2", "JUN", "JUNB", "JUND", "FOS", "DUSP1", "CDKN1A", "FOSB", "BTG2", "KLF6", "KLF4")
-    # cc_genes <- unique((unlist(cc.genes.updated.2019)))
-    stress_genes <- cc_genes <- c()
-    hist_genes <- grep("HIST", rownames(seu@assays$RNA), v = T)
-    hb_genes <- c(grep("^HB[^(P)]", rownames(seu@assays$RNA), v = T))
-    bad_features <- unique(c(
-        hist_genes, cc_genes, stress_genes, hb_genes,
-        # "MALAT1", "NEAT1", "XIST", "ACTB",
-        grep("^MT-|^MTRNR2L|MTRNR2L|RP[SL]|^RP[SL]|^HSP|^DNAJ|^HSP|^DNAJ|RIK|AL|-RS|-PS|MIR|ATP|GM|UQC",
-            rownames(seu@assays$RNA),
-            v = T
-        )
-    ))
-
-    # Create single cell experiment object
-    sce <- SingleCellExperiment(assays = list(counts = counts), colData = metadata)
-    # keep samples that has at least 10 cells per group
-    tb <- as.data.frame(table(colData(sce)$SC_sample, colData(sce)$Mf_agg)) %>%
-        tidyr::spread(key = Var2, value = Freq) %>%
-        dplyr::mutate(Sum = Agg + Sca) %>%
-        dplyr::mutate(Agg_perc = Agg / Sum)
-    tb
-
-    colnames(tb)[1] <- "Sample"
-    samples_remained <- tb %>%
-        dplyr::filter(Agg >= mincell) %>%
-        dplyr::filter(Sca >= mincell) %>%
-        .$Sample
-
-    # subset SingleCellExperiment object
-    sce <- sce[, colData(sce)$SC_sample %in% samples_remained]
-
-    # Aggregate across cluster-sample groups
-    colData(sce)$SC_sample <- factor(colData(sce)$SC_sample)
-    summed <- aggregateAcrossCells(sce, id = colData(sce)[, c("Mf_agg", "SC_sample")])
-
-    # Creating up a DGEList object for use in edgeR
-    y <- DGEList(counts(summed), samples = colData(summed))
-
-    # Filter features
-    keep <- filterByExpr(y, group = summed$Mf_agg)
-    y <- y[keep, ]
-    y <- y[!(rownames(y) %in% bad_features), ]
-
-
-    # Normalization and model fitting
-    y <- calcNormFactors(y)
-    design <- model.matrix(~ 0 + Mf_agg + SC_sample, data = colData(summed))
-    contrast <- makeContrasts(Agg_vs_Sca = Mf_aggAgg - Mf_aggSca, levels = design)
-    y <- estimateDisp(y, design)
-    fit <- glmQLFit(y, design, robust = TRUE)
-    PseudoBulk_restuls <- glmQLFTest(fit, contrast = contrast)
-
-    # Export DEG results to different sheets in the same Excel file
-    sheetName <- as.character(mf_total_values)
-    write.xlsx(PseudoBulk_restuls %>% as.data.frame(),
-        file = "results/SA2021_AggSpa_DEGs_pseudobulk.xlsx",
-        row.names = TRUE,
-        sheetName = sheetName,
-        append = ifelse(mf_total_values == 3, FALSE, TRUE)
-    )
-
-    jgc()
-}
-
-# Single-cell DEG analysis
-dim(seu@assays$RNA)
-Mph_total_values <- c(3, 4, 5, 6)
-for (mf_total_values in Mph_total_values) {
-    seu$Mf_agg <- factor(ifelse((seu$Mph_total >= mf_total_values), "Agg", "Sca"))
-    Idents(seu) <- seu$Mf_agg
-    # Perform differential expression analysis
-    # seu <- PrepSCTFindMarkers(seu)
-    sc_results <- FindMarkers(
-        object = seu,
-        ident.1 = "Agg",
-        ident.2 = "Sca",
-        # features = features,
-        test.use = "wilcox",
-        assay = "SCT",
-        only.pos = FALSE,
-        min.pct = 0.1,
-        logfc.threshold = 0,
-        verbose = TRUE,
-        densify = FALSE
-    )
-
-    # View the top differentially expressed genes
-    # head(sc_results)
-    # View(sc_results)
-
-
-    # for exporting results
-    library(rJava)
-    library(xlsx)
-    library(stringr)
-    jgc <- function() {
-        .jcall("java/lang/System", method = "gc")
-        gc()
-    }
-
-    write.xlsx(sc_results %>% as.data.frame(),
-        file = "results/SA2021_AggSpa_DEGs_scRNAseq.xlsx",
-        row.names = T,
-        sheetName = paste0(mf_total_values),
-        append = ifelse(mf_total_values == 3, FALSE, TRUE)
-    )
-    jgc()
-}
-
-# ! save the combined results
-saveRDS(seu,
-    file = "SA2021_03_cytospace_result_Mf_seu.rds"
-)
-# seu <- readRDS("SA2021_03_cytospace_result_Mf_seu.rds")
-
-
 ### Section 4: DEG analysis and gene set enrichment --------------------------------------------------
 library(rJava)
 library(xlsx)
@@ -712,7 +558,7 @@ exprMat_filter <- exprMat[loci1, ]
 dim(exprMat_filter)
 
 # Tranfer into loom files
-loom <- build_loom("R/SA2021_step2_Mf_seu.loom", dgem = exprMat_filter)
+loom <- build_loom("R/SA2021_step3_Mf_seu.loom", dgem = exprMat_filter)
 # loom <- add_cell_annotation(loom, cellInfo)
 close_loom(loom)
 
@@ -731,11 +577,11 @@ library(data.table)
 
 # !reset your work diretory
 SCENICdir <- "/path_to_data/HCC-sp-RNAseq/SCENIC/results"
-scenicLoomPath <- file.path(SCENICdir, 'SA2021_step2_Mf_seu.scenic.loom')
-motifEnrichmentFile <- file.path(SCENICdir, 'SA2021_step2_Mf_seu.motifs.csv')
-regulonAucFile <- file.path(SCENICdir, 'SA2021_step2_Mf_seu.auc.csv')
-BinarymatFile <- file.path(SCENICdir, 'SA2021_step2_Mf_seu.bin.csv')
-regulonAucThresholdsFile <- file.path(SCENICdir, 'SA2021_step2_Mf_seu.thresholds.csv')
+scenicLoomPath <- file.path(SCENICdir, 'SA2021_step3_Mf_seu.scenic.loom')
+motifEnrichmentFile <- file.path(SCENICdir, 'SA2021_step3_Mf_seu.motifs.csv')
+regulonAucFile <- file.path(SCENICdir, 'SA2021_step3_Mf_seu.auc.csv')
+BinarymatFile <- file.path(SCENICdir, 'SA2021_step3_Mf_seu.bin.csv')
+regulonAucThresholdsFile <- file.path(SCENICdir, 'SA2021_step3_Mf_seu.thresholds.csv')
 
 all(file.exists(scenicLoomPath), file.exists(motifEnrichmentFile), file.exists(regulonAucFile),file.exists(BinarymatFile), file.exists(regulonAucThresholdsFile))
 
